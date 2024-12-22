@@ -56,5 +56,5 @@ target_link_libraries(WiFiDriver PRIVATE
 set_property(TARGET WiFiDriver PROPERTY CXX_STANDARD 20)
 target_include_directories(WiFiDriver PRIVATE hal)
 
-target_compile_options(WiFiDriver PRIVATE -fno-omit-frame-pointer -fsanitize=address)
+target_compile_options(WiFiDriver PRIVATE -fno-omit-frame-pointer -fsanitize=address -g)
 target_link_options(WiFiDriver PRIVATE -fsanitize=address)
