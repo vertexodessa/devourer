@@ -233,6 +233,14 @@ typedef unsigned int u32;
     (IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_BW | IEEE80211_RADIOTAP_MCS_HAVE_GI |               \
      IEEE80211_RADIOTAP_MCS_HAVE_STBC | IEEE80211_RADIOTAP_MCS_HAVE_FEC)
 
+#ifdef __GNUC__
+#define PACK( __Declaration__ ) __Declaration__ __attribute__((__packed__))
+#endif
+
+#ifdef _MSC_VER
+#define PACK( __Declaration__ ) __pragma( pack(push, 1) ) __Declaration__ __pragma( pack(pop))
+#endif
+
 union Keytype
 {
     u8 skey[16];
@@ -400,7 +408,7 @@ struct pkt_attrib
     u8 inject; /* == a5 if injected */
 };
 
-struct rtw_ieee80211_hdr
+PACK(struct rtw_ieee80211_hdr
 {
     u16 frame_ctl;
     u16 duration_id;
@@ -409,9 +417,9 @@ struct rtw_ieee80211_hdr
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
     u8 addr4[ETH_ALEN];
-} __attribute__((packed));
+});
 
-struct rtw_ieee80211_hdr_3addr
+PACK(struct rtw_ieee80211_hdr_3addr
 {
     u16 frame_ctl;
     u16 duration_id;
@@ -419,9 +427,9 @@ struct rtw_ieee80211_hdr_3addr
     u8 addr2[ETH_ALEN];
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
-} __attribute__((packed));
+});
 
-struct rtw_ieee80211_hdr_qos
+PACK(struct rtw_ieee80211_hdr_qos
 {
     u16 frame_ctl;
     u16 duration_id;
@@ -431,9 +439,9 @@ struct rtw_ieee80211_hdr_qos
     u16 seq_ctl;
     u8 addr4[ETH_ALEN];
     u16 qc;
-} __attribute__((packed));
+});
 
-struct rtw_ieee80211_hdr_3addr_qos
+PACK(struct rtw_ieee80211_hdr_3addr_qos
 {
     u16 frame_ctl;
     u16 duration_id;
@@ -442,16 +450,16 @@ struct rtw_ieee80211_hdr_3addr_qos
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
     u16 qc;
-} __attribute__((packed));
+});
 
-struct eapol
+PACK(struct eapol
 {
     u8 snap[6];
     u16 ethertype;
     u8 version;
     u8 type;
     u16 length;
-} __attribute__((packed));
+});
 
 struct tx_desc
 {
