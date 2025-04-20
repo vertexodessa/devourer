@@ -41,7 +41,7 @@ class HalModule {
   Logger_t _logger;
   bool _macPwrCtrlOn = false;
   uint32_t _intrMask[3] = {0};
-  bool _usbTxAggMode = true;
+  bool _usbTxAggMode = false;
   uint8_t _usbTxAggDescNum =
       0x01; // adjust value for OQT Overflow issue 0x3; only 4 bits
   RX_AGG_MODE _rxAggMode = RX_AGG_USB;
