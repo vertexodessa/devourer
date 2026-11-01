@@ -1,5 +1,7 @@
 #include "FrameParser.h"
 
+#include <atomic>
+
 #include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 
 #define CONFIG_USB_RX_AGGREGATION 1
@@ -205,9 +207,17 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
                      pattrib.crc_err, pattrib.icv_err, pattrib.pkt_len);
     }
 
-    if (pattrib.mfrag) {
-      // !!! We skips this packages because ohd not use fragmentation
-      _logger->warn("mfrag scipping");
+    if (pattrib.mfrag && !pattrib.crc_err) {
+      /* Nothing on our links fragments. On FCS-failed frames (kept for
+       * salvage) the bit is descriptor garbage: a per-frame warning there
+       * printed 2626 lines in one 35 s Palianytsia live run on ch 40, and
+       * all 613 of a 25 s run had crc_err=1. A clean frame with the bit is a foreign
+       * station; warn on the first and every 1000th. Static, because the
+       * device builds a fresh FrameParser per USB transfer. */
+      static std::atomic<long long> clean_mfrag{0};
+      const long long n = ++clean_mfrag;
+      if (n % 1000 == 1)
+        _logger->warn("RX MORE_FRAG frames without crc_err: {}", n);
 
       // if (rtw_os_alloc_recvframe(precvframe, pbuf.Slice(pattrib.shift_sz +
       // pattrib.drvinfo_sz + RXDESC_SIZE), pskb) == false)
