@@ -44,7 +44,9 @@ enum class ChipGeneration : uint8_t {
    * non-Realtek generation. Register width, the vendor-request opcodes and the
    * in-band MCU plane all differ; nothing that switches on this value may
    * assume a Realtek register map. */
-  Mt7612u
+  Mt7612u,
+  /* AIC8800D80: host-loaded firmware, every control is a firmware message. */
+  Aic8800
 };
 
 inline const char *generation_name(ChipGeneration g) {
@@ -61,6 +63,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "kestrel";
   case ChipGeneration::Mt7612u:
     return "mt7612u";
+  case ChipGeneration::Aic8800:
+    return "aic8800";
   default:
     return "unknown";
   }
@@ -99,6 +103,7 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Mt7612u  ? ac
+         : g == ChipGeneration::Aic8800  ? kBw20
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }

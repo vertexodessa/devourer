@@ -31,6 +31,10 @@
 #include "rtl8733b/Rtl8733bDevice.h"
 #endif
 #include "rtl8733b/Rtl8733bUsbIds.h"
+#include "aic8800/Aic8800Proto.h" /* header-only ids, always compiled */
+#if defined(DEVOURER_HAVE_AIC8800)
+#include "aic8800/Aic8800Radio.h"
+#endif
 #include "mt7612u/Mt7612uUsbIds.h" /* header-only VID:PID table, always compiled */
 #if defined(DEVOURER_HAVE_MT7612U)
 #include "mt7612u/Mt7612uRadio.h"
@@ -186,6 +190,24 @@ WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
     _logger->error("Kestrel chip ({:04x}:{:04x}) detected but Kestrel support "
                    "not compiled in (DEVOURER_KESTREL_8852B/_8852C=OFF)",
                    vid, pid);
+    return nullptr;
+#endif
+  }
+
+  /* AIC8800 has no Realtek vendor registers either. Only the firmware state is
+   * a radio; the bootrom id needs aic8800::open_radio first. */
+  if (devourer::aic8800::is_usb_id(vid, pid)) {
+#if defined(DEVOURER_HAVE_AIC8800)
+    if (pid != devourer::aic8800::kPidFmac) {
+      _logger->error("AIC8800 ({:04x}:{:04x}) has no firmware running; use "
+                     "aic8800::open_radio", vid, pid);
+      return nullptr;
+    }
+    _logger->info("Creating Aic8800Radio ({:04x}:{:04x})", vid, pid);
+    return std::make_unique<Aic8800Radio>(dev_handle, ctx, std::move(usb_lock), _logger, cfg);
+#else
+    _logger->error("AIC8800 ({:04x}:{:04x}) detected but support is not compiled "
+                   "in (DEVOURER_AIC8800=OFF)", vid, pid);
     return nullptr;
 #endif
   }

@@ -58,6 +58,8 @@ option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE, RT
 # gate, which is unconditional: with it OFF, such an adapter is refused rather
 # than misdetected as Realtek.
 option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
+# AIC8800D80: needs its firmware files at run time (not shipped here).
+option(DEVOURER_AIC8800       "AIC8800D80 (USB, host-loaded firmware)"          OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -102,7 +104,8 @@ endif()
 if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
    AND NOT DEVOURER_8733B
    AND NOT DEVOURER_KESTREL
-   AND NOT DEVOURER_MT7612U)
+   AND NOT DEVOURER_MT7612U
+   AND NOT DEVOURER_AIC8800)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
@@ -414,6 +417,15 @@ if(DEVOURER_MT7612U)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT7612U=1)
 endif()
 
+# --- AIC8800D80 ---
+if(DEVOURER_AIC8800)
+    target_sources(devourer PRIVATE
+        src/aic8800/Aic8800Fw.cpp src/aic8800/Aic8800Fw.h
+        src/aic8800/Aic8800Radio.cpp src/aic8800/Aic8800Radio.h
+        src/aic8800/Aic8800Proto.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_AIC8800=1)
+endif()
+
 # --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
 if(DEVOURER_PCIE)
     target_sources(devourer PRIVATE
@@ -697,6 +709,11 @@ if(DEVOURER_MT7612U AND UNIX)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
 endif()
 
+if(DEVOURER_AIC8800 AND UNIX)
+    add_executable(aic8800probe src/aic8800/tools/aic8800probe.cpp)
+    target_link_libraries(aic8800probe PRIVATE devourer PkgConfig::libusb)
+endif()
+
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
 # Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
 # (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.
@@ -951,6 +968,10 @@ add_test(NAME radio_iface COMMAND RadioIfaceSelftest)
 # no second chance. This pins the one property that makes that safe: the
 # MediaTek pair set never claims a device a Realtek table owns. Header-only, so
 # it costs a compile and no hardware.
+add_executable(Aic8800ProtoSelftest tests/aic8800_proto_selftest.cpp)
+target_link_libraries(Aic8800ProtoSelftest PRIVATE devourer)
+add_test(NAME aic8800_proto COMMAND Aic8800ProtoSelftest)
+
 add_executable(Mt7612uUsbIdsSelftest
     tests/mt7612u_usb_ids_selftest.cpp
 )

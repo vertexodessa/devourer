@@ -6,6 +6,7 @@
 struct libusb_device;
 
 #include "AdapterCaps.h"
+#include "aic8800/Aic8800Proto.h"
 #include "kestrel/KestrelUsbIds.h"
 #include "mt7612u/Mt7612uUsbIds.h"
 #include "rtl8733b/Rtl8733bUsbIds.h"
@@ -63,6 +64,8 @@ inline ChipGeneration generation_for_chip_id(uint8_t chip_id) {
 inline ChipGeneration generation_for_usb_id(uint16_t vid, uint16_t pid) {
   if (mt7612u::is_usb_id(vid, pid))
     return ChipGeneration::Mt7612u;
+  if (aic8800::is_usb_id(vid, pid))
+    return ChipGeneration::Aic8800;
   if (kestrel::variant_for_usb_id(vid, pid))
     return ChipGeneration::Kestrel;
   return ChipGeneration::Unknown;
