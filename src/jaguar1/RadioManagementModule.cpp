@@ -37,9 +37,10 @@ int get_40mhz_center_channel(int channel) {
         // 5GHz UNII-2E (if applicable)
         {132, 134}, {136, 134},
         {140, 142}, {144, 142},
-        // 5GHz UNII-3
-        {149, 151}, {153, 155},
-        {157, 159}, {161, 163}
+        // 5GHz UNII-3: the raster restarts at 149, so the pairs are
+        // 149+153 and 157+161 (153 and 161 are the upper halves).
+        {149, 151}, {153, 151},
+        {157, 159}, {161, 159}
     };
 
     auto it = channel_map.find(channel);
