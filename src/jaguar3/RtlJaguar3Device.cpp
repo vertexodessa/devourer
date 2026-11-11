@@ -53,6 +53,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
       _variant{variant}, _hal{device, logger, variant, _cfg},
       _radioManagement{device, logger, variant, _cfg}, _phydm{device, logger} {
+  _wide_tx_igi_floor.store(_cfg.tuning.wide_tx_igi_floor, std::memory_order_relaxed);
   /* fastretune_fw: the fw-switch H2C must ride the HAL's HMEBOX box counter
    * (the coex runtime thread sends its H2Cs through the same one; both
    * callers serialize on _reg_mu). */
@@ -1868,7 +1869,23 @@ void RtlJaguar3Device::apply_igi_floor_locked(uint8_t channel,
                                               bool wide_tx_seen) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
   _phydm.set_igi_floor(
-      (wide && wide_tx_seen) ? _cfg.tuning.wide_tx_igi_floor : 0, channel);
+      (wide && wide_tx_seen)
+          ? _wide_tx_igi_floor.load(std::memory_order_relaxed)
+          : 0,
+      channel);
+}
+
+bool RtlJaguar3Device::SetWideTxIgiFloor(uint8_t floor) {
+  if (floor > 0x7f)
+    return false;
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _wide_tx_igi_floor.store(floor, std::memory_order_relaxed);
+  /* Before bring-up there is no tune to apply it to: the first wide frame
+   * arms it (build_tx_block). After, the retune paths' own rule decides
+   * whether it is on right now. */
+  if (_brought_up)
+    apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth);
+  return true;
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -3008,7 +3025,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   const bool wide_frame =
       bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80;
   const bool c_die = _variant == jaguar3::ChipVariant::C8822C;
-  if (wide_frame && _cfg.tuning.wide_tx_igi_floor != 0 &&
+  if (wide_frame && _wide_tx_igi_floor.load(std::memory_order_relaxed) != 0 &&
       !_wide_tx_seen.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_seen.load(std::memory_order_relaxed)) {

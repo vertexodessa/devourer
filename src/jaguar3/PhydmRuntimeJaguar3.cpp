@@ -36,7 +36,13 @@ void PhydmRuntimeJaguar3::set_igi_floor(uint8_t floor, uint8_t channel) {
   const uint8_t prev = _igi_floor;
   _igi_floor = floor;
   if (floor != 0) {
-    if (get_igi() < floor)
+    /* A lowered floor parks IGI at it: on the quiet channel the floor is
+     * for, DIG walks IGI down to the floor anyway, one tick (~2 s) at a
+     * time; parking puts the receiver there at once, so a caller trying
+     * floors one after another sees each value's own state. A retune
+     * re-applies the same floor and changes nothing here. */
+    const uint8_t igi = get_igi();
+    if (igi < floor || (prev != 0 && floor < prev && igi > floor))
       set_igi(floor);
   } else if (prev != 0) {
     /* The top of the window dig() would clamp to on its next tick. */

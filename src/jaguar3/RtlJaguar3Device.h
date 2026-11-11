@@ -158,6 +158,11 @@ public:
   bool SetTxPowerRateDiffs(
       const std::optional<devourer::TxRateDiffsQdb> &diffs) override;
   bool ReApplyTxPower() override;
+  /* Stores the floor and, when it is on now (a wide frame already went out
+   * and the tune is 40/80 MHz), applies it under _reg_mu at once: a raised
+   * floor lifts IGI to it, a lowered one parks IGI at it (see
+   * PhydmRuntimeJaguar3::set_igi_floor). */
+  bool SetWideTxIgiFloor(uint8_t floor) override;
   /* Per-packet TX-power offset — session default. Programs a
    * hardware offset BANK (global 0x1e70 reg0/reg1, see TxPktPwrBanks.h) and
    * stamps its 2-bit selector into every TX descriptor's TXPWR_OFSET_TYPE, so
@@ -403,6 +408,11 @@ private:
                            _wide_tx_seen.load(std::memory_order_relaxed));
   }
   std::atomic<bool> _wide_tx_seen{false};
+  /* The floor in force: DeviceConfig::Tuning::wide_tx_igi_floor at
+   * construction, SetWideTxIgiFloor after. Atomic because the TX path reads
+   * it on every wide frame without _reg_mu (the arm check); written under
+   * _reg_mu. */
+  std::atomic<uint8_t> _wide_tx_igi_floor{0};
   SelectedChannel _channel{};
   /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
    * so the RX completion handler can read the currently-tuned width without

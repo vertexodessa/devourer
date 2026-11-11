@@ -184,6 +184,17 @@ public:
    * any knob. Returns false when unsupported or the chip isn't brought up. */
   virtual bool ReApplyTxPower() { return false; }
 
+  /* Replace DeviceConfig::Tuning::wide_tx_igi_floor at run time (raw IGI,
+   * 0..0x7f, 0 = off; the stall it prevents is that field's comment). Same
+   * threading contract as the TX-power knobs above. A unit's floor is
+   * measured by trying values one after another on the live device, which a
+   * construction-time field cannot do. Returns false where the generation
+   * has no floor (everything except Jaguar3) or the value is out of range. */
+  virtual bool SetWideTxIgiFloor(uint8_t floor) {
+    (void)floor;
+    return false;
+  }
+
   /* Snapshot of the knob state + representative effective indices (register
    * readback where the family's TXAGC block is readable). */
   virtual devourer::TxPowerState GetTxPowerState() { return {}; }

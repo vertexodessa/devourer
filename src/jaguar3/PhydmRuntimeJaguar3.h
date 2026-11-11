@@ -41,9 +41,9 @@ public:
   void on_channel_change() { _cck_lv_valid = false; }
 
   /* Lower bound for DIG, honoured by every later tick. 0 = none. Applied at
-   * once both ways: setting one raises IGI to it, and dropping one clamps IGI
-   * back into `channel`'s normal DIG window instead of leaving the raised gain
-   * for up to a tick. Keeping it at 0 touches no register. The wide-TX floor
+   * once every way: setting one raises IGI to it, lowering one parks IGI at
+   * the new floor, and dropping one clamps IGI back into `channel`'s normal
+   * DIG window instead of leaving the raised gain for up to a tick. Keeping it at 0 touches no register. The wide-TX floor
    * this carries, and why it exists: DeviceConfig::Tuning::
    * wide_tx_igi_floor. */
   void set_igi_floor(uint8_t floor, uint8_t channel);
