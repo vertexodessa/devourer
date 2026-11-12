@@ -126,7 +126,13 @@ TX/TX+RX sessions, from a dedicated housekeeping thread in RX-only sessions
   PD/CS level ladder in `0x1ac8/0x1acc/0x1ad0`.
 - **EDCCA tracking**: `th_l2h = max(IGI+8, 48)`, `th_h2l = th_l2h − 8` into
   `0x84c` (matches the kernel end state). `SetCcaMode`'s carrier-sense-disable
-  knob (primary CCA + EDCCA) suppresses this tracking.
+  knob (primary CCA + EDCCA) suppresses this tracking. `th_l2h` is held at
+  127, the top of its biased byte. The kernel never gets there (its IGI stays
+  under the DIG ceiling), a wide-TX IGI floor can: unbounded, the byte wraps
+  from IGI `0x78`, and at `0x7c`–`0x7f` the write stopped a saturated 40 MHz
+  transmitter for good at the first tick in 9 of 17 starts on one RTL8822E
+  (`0x77`–`0x7b`: 0 of 10). With the bound 12 of 12 starts at `0x7c`–`0x7f`
+  ran.
 
 The kernel's remaining watchdog mechanisms self-disable without a link and
 are intentionally absent: CFO tracking (returns unless associated), rate
