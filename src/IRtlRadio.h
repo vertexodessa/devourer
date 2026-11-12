@@ -75,6 +75,13 @@ public:
    * sampling faster than a few times a second. */
   virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
+  /* Running sums of the gain-control pass's CCA / false-alarm windows (see
+   * RxActivity in RxSense.h). Unlike GetRxEnergy it reads no register and
+   * takes nothing from the pass's own window, so it is safe from any thread
+   * at any rate, also under a saturated transmitter. Jaguar3 only; elsewhere
+   * valid=false. */
+  virtual RxActivity GetRxActivity() { return {}; }
+
   /* Scout read: the cheapest frame-free OFDM FA + CCA delta the chip offers,
    * for a caller that dwells on a candidate channel for a few ms and needs
    * one number back per visit. Contract as GetRxEnergy(false) for the fields

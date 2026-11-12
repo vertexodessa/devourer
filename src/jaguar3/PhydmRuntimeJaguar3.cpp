@@ -1,5 +1,7 @@
 #include "PhydmRuntimeJaguar3.h"
 
+#include <chrono>
+
 namespace jaguar3 {
 
 namespace {
@@ -241,6 +243,18 @@ void PhydmRuntimeJaguar3::edcca(uint8_t igi) {
 
 void PhydmRuntimeJaguar3::tick(uint8_t channel, bool edcca_track) {
   const FaStats fa = fa_statistics_and_reset();
+  const uint64_t now_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (_last_tick_us != 0) {
+    _act_seq.fetch_add(1);
+    _cca_total.fetch_add(fa.cca_all);
+    _fa_total.fetch_add(fa.fa_all);
+    _window_us_total.fetch_add(now_us - _last_tick_us);
+    _act_seq.fetch_add(1);
+  }
+  _last_tick_us = now_us;
   dig(fa, is_dfs_channel(channel));
   if (fa.cck_enabled)
     cck_pd(fa);

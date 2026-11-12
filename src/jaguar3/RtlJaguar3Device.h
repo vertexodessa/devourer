@@ -230,6 +230,7 @@ public:
    * floor from a second, absolute-threshold NHM window (the vendor ACS
    * recipe; NoiseFloorMath.h) — this generation has no idle-noise report. */
   RxEnergy GetRxEnergy(bool with_nhm) override;
+  RxActivity GetRxActivity() override;
 
   /* Frame-free scout read (see IRtlRadio::GetRxEnergyScout) — 8 reads then
    * a 4-write composed reset, 12 EP0 transfers in TWO batched groups (the

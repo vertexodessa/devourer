@@ -50,6 +50,26 @@
  * a ready bit at 1 ms granularity. Anything sampling at a sub-second cadence —
  * or throwing the read away to reset the counters before an observation
  * window — wants with_nhm=false. */
+/* What the receiver's front end saw since bring-up, summed by the driver's
+ * own periodic gain-control pass from the counter windows it reads anyway:
+ * no register is read for this and nothing is reset. A frame the chip starts
+ * on counts in `cca` whether or not it is delivered to the packet callback
+ * (a frame it cannot decode, or loses under its own transmitter). `window_us`
+ * is the time those windows cover; a rate is a difference of two snapshots,
+ * cca over window_us. The sums move once per pass (about 2 s on Jaguar3),
+ * all three together: a snapshot is never half of a pass. What happened
+ * since the last pass is in no snapshot yet, so a caller that wants the
+ * events of a stretch of time takes its first snapshot when window_us has
+ * moved inside the stretch, and gets the windows that lie wholly in it.
+ * A GetRxEnergy or GetRxEnergyScout call between two passes resets the
+ * counters the pass reads, and what it took is missing here. */
+struct RxActivity {
+  bool valid = false;
+  uint64_t cca = 0; /* carrier-sense events: OFDM, plus CCK on 2.4 GHz */
+  uint64_t fa = 0;  /* false alarms, same halves */
+  uint64_t window_us = 0;
+};
+
 struct RxEnergy {
   /* phydm false-alarm + CCA counters (delta since the previous reset of
    * each half — see the valid_cck note above for why that is not always
