@@ -300,6 +300,15 @@ struct DeviceConfig {
      * on Jaguar1) and the vendor packing rules (see src/TxAggPlan.h). USB
      * only; the PCIe rings take frames individually. */
     unsigned usb_agg_max = 0;
+    /* env: DEVOURER_TX_USB_AGG_8812A=1 — Jaguar1 RTL8812A only: also pack its
+     * URBs when usb_agg_max > 0. Off by
+     * default because on the one 8812AU unit measured (0bda:881a with an
+     * external PA, maburd at usb_agg_max 3) ~85 % of the packed frames never
+     * reached the air (GS pre-FEC loss 0.87 vs 0.00 with packing off, 20 and
+     * 40 MHz, 2026-11-14), while the chip reported every URB sent. Other
+     * 8812AU units may take it; set true to measure one. The 8821A and 8814A
+     * are not affected by this flag. */
+    bool usb_agg_8812a = false;
     /* env: DEVOURER_TX_REPORT — per-frame TX-status reports (src/TxReport.h):
      * sets SPE_RPT in every data TX descriptor so the firmware answers each
      * transmission with a CCX report (delivered/retry-drop + hardware retry

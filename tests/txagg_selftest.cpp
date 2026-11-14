@@ -145,6 +145,14 @@ static void test_plan_oqt_guard() {
   CHECK(p3.frames() == 3, "oqt3: frames=%zu want 3", p3.frames());
 }
 
+static void test_jaguar1_8812a_gate() {
+  using devourer::jaguar1_usb_agg_max;
+  CHECK(jaguar1_usb_agg_max(true, 3, false) == 0, "8812a default must not pack");
+  CHECK(jaguar1_usb_agg_max(true, 3, true) == 3, "8812a opt-in packs");
+  CHECK(jaguar1_usb_agg_max(false, 3, false) == 3, "8821a/8814a keep the knob");
+  CHECK(jaguar1_usb_agg_max(false, 0, true) == 0, "knob off stays off");
+}
+
 static void test_plan_caps() {
   auto lim = lim_halmac_hs();
   lim.max_frames = 2;
@@ -251,6 +259,7 @@ int main() {
   test_plan_shim();
   test_plan_oqt_guard();
   test_plan_caps();
+  test_jaguar1_8812a_gate();
 #if defined(DEVOURER_HAVE_JAGUAR2)
   test_desc_8822b();
 #endif

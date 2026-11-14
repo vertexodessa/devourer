@@ -1186,7 +1186,9 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
    * (USB_TXAGG_NUM; the matching TXDMA TDECTRL block-desc count is programmed
    * at bring-up by usb_AggSettingTxUpdate_8812A when the knob is on). Packing
    * rules in src/TxAggPlan.h. Knob off -> the interface-default loop. */
-  const unsigned agg = _cfg.tx.usb_agg_max;
+  const auto ic = _eepromManager->version_id.ICType;
+  const unsigned agg = devourer::jaguar1_usb_agg_max(
+      ic == CHIP_8812, _cfg.tx.usb_agg_max, _cfg.tx.usb_agg_8812a);
   if (agg <= 1 || !_device.is_usb() || count == 0)
     return IRadio::send_packets(pkts, count);
 
@@ -1201,7 +1203,6 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
   /* Vendor UsbTxAggDescNum: how many descriptors may START inside one bulk
    * window — 8812A silicon overflows its OQT beyond 1 (the vendor "OQT
    * overflow" clamp); the 8821A takes 6, the 8814A runs the kernel's 3. */
-  const auto ic = _eepromManager->version_id.ICType;
   lim.descs_per_bulk = ic == CHIP_8814A ? 3 : ic == CHIP_8821 ? 6 : 1;
   /* Vendor rtl8812au layout: the first aggregated block carries the 8-byte
    * PKT_OFFSET reserve (xmit_frame pkt_offset = 1). */
