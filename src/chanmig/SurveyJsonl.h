@@ -34,16 +34,19 @@ inline void emit_survey_dwell(EventSink &sink, const SurveyDwell &d) {
       .f("retune_us", (long long)d.retune_us)
       .f("settle_ms", d.settle_ms)
       .f("observe_ms", (long long)d.observe_ms);
+  /* cca_ofdm/fa_ofdm are gated on valid_fa; cca_cck/fa_cck are gated
+   * SEPARATELY on valid_cck (RxSense.h) — a scout-sourced dwell can have a
+   * real OFDM delta with no CCK reset behind it, and that must round-trip
+   * through jsonl as null, not as a fake zero indistinguishable from a
+   * genuinely quiet CCK band. */
   if (d.valid_fa)
-    ev.f("cca_ofdm", d.cca_ofdm)
-        .f("cca_cck", d.cca_cck)
-        .f("fa_ofdm", d.fa_ofdm)
-        .f("fa_cck", d.fa_cck);
+    ev.f("cca_ofdm", d.cca_ofdm).f("fa_ofdm", d.fa_ofdm);
   else
-    ev.f("cca_ofdm", nullptr)
-        .f("cca_cck", nullptr)
-        .f("fa_ofdm", nullptr)
-        .f("fa_cck", nullptr);
+    ev.f("cca_ofdm", nullptr).f("fa_ofdm", nullptr);
+  if (d.valid_cck)
+    ev.f("cca_cck", d.cca_cck).f("fa_cck", d.fa_cck);
+  else
+    ev.f("cca_cck", nullptr).f("fa_cck", nullptr);
   if (d.valid_igi)
     ev.f("igi", d.igi);
   else
@@ -115,10 +118,16 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
   if (jsonl_int(line, "cca_ofdm", &x)) {
     d.valid_fa = true;
     d.cca_ofdm = static_cast<uint32_t>(x);
-    if (jsonl_int(line, "cca_cck", &x))
-      d.cca_cck = static_cast<uint32_t>(x);
     if (jsonl_int(line, "fa_ofdm", &x))
       d.fa_ofdm = static_cast<uint32_t>(x);
+  }
+  /* Independent of valid_fa above — see the emit-side comment. An older
+   * line (pre-valid_cck) always wrote cca_cck/fa_cck as real numbers
+   * whenever it wrote cca_ofdm, so this still sets valid_cck correctly for
+   * historical data with no format-version bump needed. */
+  if (jsonl_int(line, "cca_cck", &x)) {
+    d.valid_cck = true;
+    d.cca_cck = static_cast<uint32_t>(x);
     if (jsonl_int(line, "fa_cck", &x))
       d.fa_cck = static_cast<uint32_t>(x);
   }

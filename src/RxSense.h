@@ -24,10 +24,25 @@
  * per-subcarrier CSI to the host, so this is energy, not a spectrum. Build a
  * coarse spectrum by sweeping channels/bins and sampling this per bin.
  *
- * FA/CCA counts are the DELTA since the previous GetRxEnergy() call (each read
- * resets the hardware counters), so a strong in-band carrier shows up as a jump
- * in cca_ofdm / fa_ofdm and a rise in igi. Every field carries a valid_* flag
- * because the facilities differ by chip generation.
+ * FA/CCA counts are the DELTA since the previous read that reset them (each
+ * GetRxEnergy() call resets both the OFDM and CCK halves; a JGR3
+ * GetRxEnergyScout() call resets only the OFDM half — see valid_cck below),
+ * so a strong in-band carrier shows up as a jump in cca_ofdm / fa_ofdm and a
+ * rise in igi. Every field carries a valid_* flag because the facilities
+ * differ by chip generation.
+ *
+ * valid_fa does NOT cover the CCK counters on its own: on a chip whose scout
+ * path skips the CCK reset (JGR3), a scout call fills fa_ofdm/cca_ofdm with
+ * a real delta (valid_fa=true) while leaving fa_cck/cca_cck at zero with
+ * NO reset behind that zero (valid_cck=false) — a caller that sums the OFDM
+ * and CCK halves un-gated would silently undercount every scout-sourced
+ * sample relative to a full-read sample, which is exactly what
+ * src/chanmig/EvidenceStore.h and src/hopset/HopsetSense.h gate on
+ * valid_cck to avoid. The inverse also follows: because the scout skipped
+ * the CCK reset during its dwell, the NEXT GetRxEnergy() call's fa_cck/
+ * cca_cck is a delta since the last actual CCK reset (the last GetRxEnergy,
+ * not the last GetRxEnergyScout in between) — i.e. it can span more than
+ * one nominal sampling interval whenever scout calls were interleaved.
  *
  * The read splits into two very different costs, which is why the caller picks
  * (`GetRxEnergy(bool with_nhm)`): the scalars below are a handful of register
@@ -35,13 +50,43 @@
  * a ready bit at 1 ms granularity. Anything sampling at a sub-second cadence —
  * or throwing the read away to reset the counters before an observation
  * window — wants with_nhm=false. */
+/* What the receiver's front end saw since bring-up, summed by the driver's
+ * own periodic gain-control pass from the counter windows it reads anyway:
+ * no register is read for this and nothing is reset. A frame the chip starts
+ * on counts in `cca` whether or not it is delivered to the packet callback
+ * (a frame it cannot decode, or loses under its own transmitter). `window_us`
+ * is the time those windows cover; a rate is a difference of two snapshots,
+ * cca over window_us. The sums move once per pass (about 2 s on Jaguar3),
+ * all three together: a snapshot is never half of a pass. What happened
+ * since the last pass is in no snapshot yet, so a caller that wants the
+ * events of a stretch of time takes its first snapshot when window_us has
+ * moved inside the stretch, and gets the windows that lie wholly in it.
+ * A GetRxEnergy or GetRxEnergyScout call between two passes resets the
+ * counters the pass reads, and what it took is missing here. */
+struct RxActivity {
+  bool valid = false;
+  uint64_t cca = 0; /* carrier-sense events: OFDM, plus CCK on 2.4 GHz */
+  uint64_t fa = 0;  /* false alarms, same halves */
+  uint64_t window_us = 0;
+};
+
 struct RxEnergy {
-  /* phydm false-alarm + CCA counters (delta since the previous read). */
+  /* phydm false-alarm + CCA counters (delta since the previous reset of
+   * each half — see the valid_cck note above for why that is not always
+   * "the previous read"). */
   bool valid_fa = false;
   uint32_t fa_ofdm = 0;  /* OFDM false-alarm count */
   uint32_t fa_cck = 0;   /* CCK false-alarm count */
   uint32_t cca_ofdm = 0; /* OFDM CCA (channel-busy) count */
   uint32_t cca_cck = 0;  /* CCK CCA count */
+  /* True when fa_cck/cca_cck came from a real reset-then-read (GetRxEnergy).
+   * False means the CCK half was never reset for this sample — either the
+   * generation has no CCK facility, or (JGR3) the read was a scout call
+   * that deliberately skips the CCK toggles to stay cheap — and fa_cck/
+   * cca_cck are 0 with no delta behind that 0, not "no CCK activity".
+   * Consumers that fold fa_cck/cca_cck into fa_ofdm/cca_ofdm MUST gate on
+   * this, not on valid_fa (which covers the OFDM half only). */
+  bool valid_cck = false;
 
   /* DIG initial-gain index (0x0c50[6:0] on the AC BB): the AGC backs the gain
    * off as the in-band floor rises, so a higher IGI means a busier/noisier
@@ -90,9 +135,27 @@ struct RxEnergy {
    * (~10 ms of USB round-trips), so it is only filled when the caller opted in
    * (DEVOURER_RX_NOISE_FLOOR). Jaguar2 fills it live (HW idle-noise report,
    * wedge-free); Jaguar1 8812A/8821A fill it from an RX-idle CAL measurement;
-   * Jaguar3 and others leave it invalid (no vendor path). */
+   * Jaguar3 and Kestrel fill it from an absolute-threshold NHM idle window
+   * (no idle-noise report on those; NoiseFloorMath.h); the RTL8733B leaves it
+   * invalid. */
   bool valid_noise_floor = false;
   int8_t abs_noise_floor_dbm = 0;
+};
+
+/* One busy-airtime NHM window (IRtlRadio::ArmNhmBusy / ReadNhmBusy):
+ * 12 buckets over devourer's absolute dBm table (nf::kNhmAbsThDbm), counted
+ * with CCA-busy samples INCLUDED and our own TX EXCLUDED. Read the upper
+ * buckets' share as airtime above that level only after the frozen-estimate
+ * check in src/jaguar3/CLAUDE.md "Busy-airtime NHM" — a frozen BB power
+ * estimate fills one bucket regardless of the air. */
+struct NhmBusy {
+  bool valid = false;        /* the window's ready bit was set */
+  uint8_t buckets[12] = {};  /* share of 255 samples; 11 thresholds -> 12 buckets */
+  uint16_t duration = 0;     /* measured window, 4 us units */
+  /* Period of the most recent arm on this device (4 us units) — a caller
+   * that armed a different period knows the result is someone else's
+   * window. */
+  uint16_t period = 0;
 };
 
 namespace devourer {

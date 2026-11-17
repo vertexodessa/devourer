@@ -169,6 +169,7 @@ public:
     out.fa_cck = e.fa_cck;
     out.cca_ofdm = e.cca_ofdm;
     out.cca_cck = e.cca_cck;
+    out.valid_cck = e.valid_cck;
     out.valid_igi = e.valid_igi;
     out.igi = e.igi;
 

@@ -64,6 +64,10 @@ struct TxSenseSample {
 
   bool valid_fa = false;
   uint32_t fa_ofdm = 0, fa_cck = 0, cca_ofdm = 0, cca_cck = 0;
+  /* Independent of valid_fa — see RxEnergy::valid_cck in RxSense.h. A
+   * scout-sourced sample can have a real OFDM delta with no CCK reset
+   * behind it. */
+  bool valid_cck = false;
 
   bool valid_igi = false;
   uint8_t igi = 0;
@@ -219,11 +223,16 @@ inline bool score_sample(const TxSenseSample &s, const TxSenseConfig &cfg,
   uint8_t src = 0;
   auto clamp01 = [](double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
   if (s.valid_fa) {
-    const double cca = static_cast<double>(s.cca_ofdm + s.cca_cck) / win_ms;
+    /* cca_cck/fa_cck only when valid_cck — a scout-sourced sample's CCK
+       half is unmeasured (0 with no reset behind it), not a real zero, and
+       must not be folded in un-gated (see RxEnergy::valid_cck). */
+    const uint32_t cck_cca = s.valid_cck ? s.cca_cck : 0;
+    const uint32_t cck_fa = s.valid_cck ? s.fa_cck : 0;
+    const double cca = static_cast<double>(s.cca_ofdm + cck_cca) / win_ms;
     acc += cfg.w_cca * clamp01(cca / cfg.cca_rate_sat);
     wsum += cfg.w_cca;
     src |= kSrcCca;
-    const double fa = static_cast<double>(s.fa_ofdm + s.fa_cck) / win_ms;
+    const double fa = static_cast<double>(s.fa_ofdm + cck_fa) / win_ms;
     acc += cfg.w_fa * clamp01(fa / cfg.fa_rate_sat);
     wsum += cfg.w_fa;
     src |= kSrcFa;

@@ -20,6 +20,14 @@ Docs: `docs/adaptive-channel-migration.md`,
   (`docs/rx-spectrum-sensing.md`); the parser still accepts v1.
   Measures only; retunes nothing but itself. Grid-legality
   validation, **no regulatory DB** — the caller owns compliance.
+  `SurveyDwell::valid_cck` gates the CCK half of that evidence **separately
+  from `valid_fa`** (`RxEnergy::valid_cck`, `src/RxSense.h`): a cheap
+  scout-sourced read skips the CCK counter reset, so `cca_cck`/`fa_cck` are 0
+  with no delta behind them and must round-trip through `survey.dwell` as
+  null, not as a fake zero. `EvidenceStore` drops them from `cca_rate`/
+  `fa_rate` when unset; the jsonl reader infers `valid_cck` from the field's
+  presence, so pre-`valid_cck` captures still replay correctly with no format
+  bump.
 - **Scoring** (`ChannelScore`, `DEVOURER_SCOUT_ADVISE`): a pure two-leg
   recommendation engine. The primary receiver's *delivery* is authoritative on
   the active channel (scout energy there is confounded by the wanted video);

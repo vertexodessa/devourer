@@ -50,9 +50,13 @@ struct SurveyDwell {
   int settle_ms = 0;
   int64_t observe_ms = 0; /* the valid observation window the deltas span */
 
-  /* Frame-free energy (deltas over observe; validity per source). */
+  /* Frame-free energy (deltas over observe; validity per source).
+   * valid_cck is independent of valid_fa — see RxEnergy::valid_cck in
+   * RxSense.h — a scout-sourced dwell can have a real OFDM delta with no
+   * CCK reset behind it. */
   bool valid_fa = false;
   uint32_t fa_ofdm = 0, fa_cck = 0, cca_ofdm = 0, cca_cck = 0;
+  bool valid_cck = false;
   bool valid_igi = false;
   uint8_t igi = 0;
   bool valid_nhm = false;
