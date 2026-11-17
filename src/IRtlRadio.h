@@ -75,6 +75,48 @@ public:
    * sampling faster than a few times a second. */
   virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
+  /* Running sums of the gain-control pass's CCA / false-alarm windows (see
+   * RxActivity in RxSense.h). Unlike GetRxEnergy it reads no register and
+   * takes nothing from the pass's own window, so it is safe from any thread
+   * at any rate, also under a saturated transmitter. Jaguar3 only; elsewhere
+   * valid=false. */
+  virtual RxActivity GetRxActivity() { return {}; }
+
+  /* Scout read: the cheapest frame-free OFDM FA + CCA delta the chip offers,
+   * for a caller that dwells on a candidate channel for a few ms and needs
+   * one number back per visit. Contract as GetRxEnergy(false) for the fields
+   * it fills (valid_fa, fa_ofdm, cca_ofdm; delta since the previous read of
+   * EITHER kind; resets the OFDM counters) — everything else is left invalid,
+   * INCLUDING valid_cck (see RxEnergy::valid_cck in RxSense.h: the scout
+   * skips the CCK reset, so cca_cck/fa_cck are not comparable to a
+   * GetRxEnergy sample and must not be summed with them un-gated).
+   * Jaguar3 overrides with a two-group batched EP0 path (12 transfers vs 24
+   * for GetRxEnergy(false)); the win is strongly host-dependent and the bench
+   * numbers are floors — see tests/scout_read_bench.cpp before quoting any.
+   * The default delegates to the full read so any caller can use it on any
+   * chip. */
+  virtual RxEnergy GetRxEnergyScout() { return GetRxEnergy(false); }
+
+  /* Busy-airtime NHM window, split so no call ever sleeps: ArmNhmBusy
+   * programs the recipe (first call, or after anything else reprogrammed
+   * NHM) and pulses the trigger for a `period_4us` window; ReadNhmBusy
+   * returns the finished window, or valid=false if it has not finished.
+   * Arm again for the next window. Jaguar3 only; every other generation
+   * returns false / valid=false. Control-plane threading contract as
+   * GetRxEnergy. Caveats (the frozen power estimate, re-arm and retune
+   * interactions): src/jaguar3/CLAUDE.md "Busy-airtime NHM". */
+  virtual bool ArmNhmBusy(uint16_t period_4us) { (void)period_4us; return false; }
+  virtual NhmBusy ReadNhmBusy() { return {}; }
+
+  /* The RF synthesizer's programmed channel (RF18[7:0], path A only, the
+   * CENTRAL channel: the pair centre at 40 MHz, the block centre at 80 MHz),
+   * read back from the chip — what the radio is actually tuned to,
+   * independent of any host-side channel state. Jaguar3 only; others -1.
+   * -1 = unsupported or not brought up; a failed register read leaves by
+   * exception on USB (house idiom), never as -1. One register read under the
+   * control-plane lock. */
+  virtual int ReadTunedCentral() { return -1; }
+
   /* The neutral reading (IRadio::GetChannelBusy), expressed in this family's
    * own facility: CLM busy airtime plus NHM-env, both of which ride
    * GetRxEnergy's armed CCX window.

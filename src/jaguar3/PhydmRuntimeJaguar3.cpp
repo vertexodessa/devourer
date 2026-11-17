@@ -1,5 +1,7 @@
 #include "PhydmRuntimeJaguar3.h"
 
+#include <chrono>
+
 namespace jaguar3 {
 
 namespace {
@@ -36,7 +38,13 @@ void PhydmRuntimeJaguar3::set_igi_floor(uint8_t floor, uint8_t channel) {
   const uint8_t prev = _igi_floor;
   _igi_floor = floor;
   if (floor != 0) {
-    if (get_igi() < floor)
+    /* A lowered floor parks IGI at it: on the quiet channel the floor is
+     * for, DIG walks IGI down to the floor anyway, one tick (~2 s) at a
+     * time; parking puts the receiver there at once, so a caller trying
+     * floors one after another sees each value's own state. A retune
+     * re-applies the same floor and changes nothing here. */
+    const uint8_t igi = get_igi();
+    if (igi < floor || (prev != 0 && floor < prev && igi > floor))
       set_igi(floor);
   } else if (prev != 0) {
     /* The top of the window dig() would clamp to on its next tick. */
@@ -209,12 +217,19 @@ void PhydmRuntimeJaguar3::cck_pd(const FaStats &fa) {
 }
 
 /* phydm_edcca_thre_calc_jgr3, normal (non-adaptivity-regulation) mode:
- * th_l2h = max(igi + 8, 48), th_h2l = th_l2h - 8, written to 0x84c as
- * biased bytes (value + 0x80): L2H in [23:16], H2L in [31:24]. */
+ * th_l2h = min(max(igi + 8, 48), 127), th_h2l = th_l2h - 8, written to
+ * 0x84c as biased bytes (value + 0x80): L2H in [23:16], H2L in [31:24]. */
 void PhydmRuntimeJaguar3::edcca(uint8_t igi) {
-  const int th_l2h =
+  int th_l2h =
       (igi + TH_L2H_DIFF_IGI > EDCCA_TH_L2H_LB) ? igi + TH_L2H_DIFF_IGI
                                                 : EDCCA_TH_L2H_LB;
+  /* The vendor's IGI stays under its DIG ceiling, so IGI + 8 always fits the
+   * biased byte. A wide-TX floor can sit above it: from IGI 0x78 the byte
+   * wraps, and at 0x7c and above the wrapped write stopped a saturated
+   * 40 MHz transmitter for good at the first tick in 9 of 17 starts on one
+   * RTL8822E. Held at 127, 12 of 12 such starts ran. */
+  if (th_l2h > 127)
+    th_l2h = 127;
   const int th_h2l = th_l2h - EDCCA_HL_DIFF_NORMAL;
   _device.phy_set_bb_reg(0x84c, 0x00ff0000,
                          static_cast<uint32_t>(th_l2h + 0x80) & 0xff);
@@ -228,6 +243,18 @@ void PhydmRuntimeJaguar3::edcca(uint8_t igi) {
 
 void PhydmRuntimeJaguar3::tick(uint8_t channel, bool edcca_track, bool dig_track) {
   const FaStats fa = fa_statistics_and_reset();
+  const uint64_t now_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (_last_tick_us != 0) {
+    _act_seq.fetch_add(1);
+    _cca_total.fetch_add(fa.cca_all);
+    _fa_total.fetch_add(fa.fa_all);
+    _window_us_total.fetch_add(now_us - _last_tick_us);
+    _act_seq.fetch_add(1);
+  }
+  _last_tick_us = now_us;
   if (dig_track)
     dig(fa, is_dfs_channel(channel));
   if (fa.cck_enabled)

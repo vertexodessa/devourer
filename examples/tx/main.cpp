@@ -282,6 +282,7 @@ static bool hopset_sense_window(IRtlRadio *dev, uint32_t settle_us,
   x.fa_cck = e.fa_cck;
   x.cca_ofdm = e.cca_ofdm;
   x.cca_cck = e.cca_cck;
+  x.valid_cck = e.valid_cck;
   x.valid_igi = e.valid_igi;
   x.igi = e.igi;
   if (e.valid_nhm) {

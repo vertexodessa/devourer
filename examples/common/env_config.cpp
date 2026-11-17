@@ -157,6 +157,7 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.cw_tone_gain = static_cast<uint8_t>(v) & 0x1F;
   if (env_long("DEVOURER_TX_USB_AGG", &v) && v > 0)
     cfg.tx.usb_agg_max = static_cast<unsigned>(v);
+  cfg.tx.usb_agg_8812a = env_flag("DEVOURER_TX_USB_AGG_8812A");
   if (env_long("DEVOURER_TX_REPORT", &v)) /* sampling divisor N, 0..255 */
     cfg.tx.report = static_cast<int>(v < 0 ? 0 : v > 255 ? 255 : v);
   if (const char *e = env_str("DEVOURER_TX_AMPDU_MODE")) {
@@ -328,6 +329,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.usb.lock_dir = e;
   if (env_str("DEVOURER_RX_ZEROCOPY")) /* default true; =0 forces the heap path */
     cfg.usb.rx_zerocopy = env_flag("DEVOURER_RX_ZEROCOPY");
+  if (env_str("DEVOURER_CTRL_BATCH")) /* default true; =0 = synchronous */
+    cfg.usb.ctrl_batch = env_flag("DEVOURER_CTRL_BATCH");
 
   return cfg;
 }

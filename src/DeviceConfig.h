@@ -183,8 +183,9 @@ struct DeviceConfig {
      * floor (dBm) in GetRxEnergy/GetRxQuality (RxEnergy.abs_noise_floor_dbm).
      * OFF by default: the vendor idle-noise measurement adds ~10 ms of USB
      * round-trips. Jaguar2 measures it live (wedge-free HW idle-noise report);
-     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and others
-     * leave it invalid (no vendor path). */
+     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and
+     * Kestrel bin idle air in an absolute-threshold NHM window (~2 ms, needs
+     * with_nhm); the RTL8733B leaves it invalid. */
     bool abs_noise_floor = false;
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
@@ -299,6 +300,15 @@ struct DeviceConfig {
      * on Jaguar1) and the vendor packing rules (see src/TxAggPlan.h). USB
      * only; the PCIe rings take frames individually. */
     unsigned usb_agg_max = 0;
+    /* env: DEVOURER_TX_USB_AGG_8812A=1 — Jaguar1 RTL8812A only: also pack its
+     * URBs when usb_agg_max > 0. Off by
+     * default because on the one 8812AU unit measured (0bda:881a with an
+     * external PA, maburd at usb_agg_max 3) ~85 % of the packed frames never
+     * reached the air (GS pre-FEC loss 0.87 vs 0.00 with packing off, 20 and
+     * 40 MHz, 2026-11-14), while the chip reported every URB sent. Other
+     * 8812AU units may take it; set true to measure one. The 8821A and 8814A
+     * are not affected by this flag. */
+    bool usb_agg_8812a = false;
     /* env: DEVOURER_TX_REPORT — per-frame TX-status reports (src/TxReport.h):
      * sets SPE_RPT in every data TX descriptor so the firmware answers each
      * transmission with a CCX report (delivered/retry-drop + hardware retry
@@ -461,7 +471,9 @@ struct DeviceConfig {
      * measured: 0x35 is 21 steps over the DFS floor 0x20 and 19-23 over the
      * 0x1e..0x22 non-DFS window. Lower it to a unit's own measured edge to
      * buy that back. 80 MHz carries the same floor, only partially
-     * validated. docs/experiments/8822c-ht40-tx-stall.md. */
+     * validated. docs/experiments/8822c-ht40-tx-stall.md. Runtime
+     * equivalent: IRadio::SetWideTxIgiFloor, which is how a unit's own edge
+     * is measured (one live device, one value after another). */
     uint8_t wide_tx_igi_floor = 0x35;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step
@@ -608,6 +620,15 @@ struct DeviceConfig {
      * historical copy-on-reap path) when unsupported, so leaving it on is safe.
      * 1 = on (default), 0 = force the heap path. */
     bool rx_zerocopy = true;
+    /* env: DEVOURER_CTRL_BATCH — batch a group of EP0 register accesses
+     * (ITransport::ctrl_batch): submit them back to back and pay one
+     * completion wait per chunk instead of one host round trip per register.
+     * Used by the Jaguar3 channel-scout energy read and the cached FastRetune
+     * hop. Default on; =0 falls the transport back to the synchronous
+     * default (the A/B knob, and the escape hatch on a host whose event pump
+     * misbehaves). The benefit is host-dependent — see
+     * tests/scout_read_bench.cpp before quoting one. */
+    bool ctrl_batch = true;
   } usb;
 
   /* ---- PCIe (DEVOURER_PCIE builds; see src/PcieTransport.h) ------------ */

@@ -1,6 +1,7 @@
 #ifndef DEVOURER_JAGUAR3_PHYDM_RUNTIME_H
 #define DEVOURER_JAGUAR3_PHYDM_RUNTIME_H
 
+#include <atomic>
 #include <cstdint>
 
 #include "logger.h"
@@ -43,12 +44,26 @@ public:
   void on_channel_change() { _cck_lv_valid = false; }
 
   /* Lower bound for DIG, honoured by every later tick. 0 = none. Applied at
-   * once both ways: setting one raises IGI to it, and dropping one clamps IGI
-   * back into `channel`'s normal DIG window instead of leaving the raised gain
-   * for up to a tick. Keeping it at 0 touches no register. The wide-TX floor
+   * once every way: setting one raises IGI to it, lowering one parks IGI at
+   * the new floor, and dropping one clamps IGI back into `channel`'s normal
+   * DIG window instead of leaving the raised gain for up to a tick. Keeping it at 0 touches no register. The wide-TX floor
    * this carries, and why it exists: DeviceConfig::Tuning::
    * wide_tx_igi_floor. */
   void set_igi_floor(uint8_t floor, uint8_t channel);
+
+  /* Sums over every tick's counter window but the first (its start is not
+   * known): RxActivity in RxSense.h. Written by tick(), read from any
+   * thread; the three values are of the same tick. */
+  void activity(uint64_t& cca, uint64_t& fa, uint64_t& window_us) const {
+    for (;;) {
+      const uint32_t s = _act_seq.load();
+      if (s & 1) continue; /* tick() is between its three adds */
+      cca = _cca_total.load();
+      fa = _fa_total.load();
+      window_us = _window_us_total.load();
+      if (_act_seq.load() == s) return;
+    }
+  }
 
 private:
   /* --- false-alarm / CCA statistics (this tick's window) --- */
@@ -69,6 +84,11 @@ private:
 
   RtlAdapter _device;
   Logger_t _logger;
+
+  /* Counter-window sums (activity()); _act_seq is odd while tick() adds. */
+  std::atomic<uint64_t> _cca_total{0}, _fa_total{0}, _window_us_total{0};
+  std::atomic<uint32_t> _act_seq{0};
+  uint64_t _last_tick_us = 0; /* 0 = no tick yet */
 
   /* DIG state */
   int _last_igi_logged = -1;

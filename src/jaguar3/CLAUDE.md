@@ -93,6 +93,18 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
 - The rtl8822e's hardware-bisected constraints (DPDT/pin-mux front end,
   single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX kernel-parity
   limitation) live in `docs/8822e-quirks.md`.
+- **Absolute noise floor = NHM, not an idle-noise report.** The 8822C/E have
+  no vendor idle-noise path (phydm_noisemonitor.c returns 0 for them; the
+  vendor ACS never asks). `GetRxEnergy(with_nhm)` under
+  `DEVOURER_RX_NOISE_FLOOR` runs a second NHM window with absolute thresholds
+  and cca/tx-on excluded (the vendor ACS recipe) and averages the occupied
+  buckets — `src/NoiseFloorMath.h`, `docs/rx-spectrum-sensing.md`. On air:
+  −95/−96 dBm on 5 GHz once settled, but the BB's power estimate is FROZEN
+  (one constant value, single-bucket histogram) for the first 1-7 s and for
+  most of a 2.4 GHz session — rejected as null by the peak-bucket guard;
+  trigger unidentified. Beware the masked BB write shifts the value to the
+  mask: the NHM th[8..10] writes were
+  double-shifted (read back 0) until the selftest pinned them.
 - **PROTOCOL_EN must be set before the LLT init.** halmac writes
   `MAC_TRX_ENABLE = 0xFF` to `REG_CR` just before the auto-LLT init; this port
   wrote the DMA-only `0x0F`. Without PROTOCOL_EN (bit 4) at that moment the
@@ -163,6 +175,46 @@ entry. Scope of that claim (`tests/j3_rf_window_readback.sh`): every one of
 the 512 window words (both paths) poked with the high 12 bits set read back
 0, on one 8812CU and one 8812EU; the post-bring-up histogram (all 512 words
 0) is only a control, since the write-only load itself clears those bits.
+
+## Runtime batched EP0 (`ctrl_batch`) — the scout read and the cached hop
+
+The same slot pool, driven at runtime instead of during bring-up.
+`ITransport::ctrl_batch` (contract + the USB hazards are doc-commented at
+the declaration in `src/Transport.h` and at the definition in
+`src/UsbTransport.cpp` — read those, not a copy here) submits a group of EP0
+reads/writes back to back and pays one completion wait per chunk. Two Jaguar3
+callers, both holding `_reg_mu` across the whole group:
+
+- **`GetRxEnergyScout()`** — the cheapest frame-free OFDM FA + CCA delta the
+  chip offers, for a caller dwelling a few ms per candidate channel. 8 reads
+  then a 4-write reset composed in memory from two of them (`ScoutEnergyMath.h`
+  — composed full dwords, never `phy_set_bb_reg`, which on this generation
+  costs a read-modify-write *and* hits the double-shift gotcha). Two groups,
+  because the writes depend on the reads. It deliberately skips the CCK reset
+  toggles, so `fa_cck`/`cca_cck` come back 0 with **no reset behind that 0** —
+  hence `RxEnergy::valid_cck`, which every consumer folding the CCK half into
+  an occupancy estimate must gate on. Skipping a reset is not free either: the
+  OFDM counters keep accumulating, so the *next* sample's rate is inflated
+  (bounded by the coex tick's own reset).
+- **`RadioManagementJaguar3::fast_retune`** — the 9–11 composed hop writes go
+  in one `ctrl_batch`, flushed early only where a helper (`apply_rxbb`,
+  `select_agc_tables`) writes registers itself. A failed batch is **not**
+  swallowed the way the per-register writes it replaced were: it fails
+  wholesale, so the fast-path caches are dropped (`invalidate_fast_caches`)
+  and the hop resyncs through the full `set_channel_bwmode`.
+
+The two hosts measured disagree completely — the 12-op scout read gets ~5.6×
+faster batched on an RK3566 aarch64 host and not at all on an x86 xHCI host
+(there the per-transfer cost is wire time, not host turnaround); both are
+floors taken with no RX loop. Numbers and method: `tests/scout_read_bench.cpp`.
+`DEVOURER_CTRL_BATCH=0` (`DeviceConfig::usb.ctrl_batch`, default on) is the
+A/B knob.
+
+Two costs recorded on that bench file and the `ctrl_batch` definition rather
+than fixed here: `tx_async`/`tx_sync` open with `flush_writes()`, so a send
+landing mid-group blocks on it; and an RX `on_data` callback can be reaped on the batching thread, so nothing reachable
+from it may take `_reg_mu` (`cfo_tick()` does — latent only because
+`DEVOURER_CFO_TRACK` defaults off).
 
 ## TX power
 
@@ -244,3 +296,40 @@ In a **TX session** with a 300 ms quiet window the counters are alive (clean
 0/0/0, carrier `clm` 5 / `fa` 1118 / `cca` 1122) — on the same 8812CU and code
 path that previously read *inert* with 4–20 ms windows, so window length rather
 than generation is the live variable in that older result.
+
+## Busy-airtime NHM (ArmNhmBusy / ReadNhmBusy)
+
+Non-blocking NHM window for a caller that wants airtime, not a floor:
+cfg 0x3 (inc_cca ON so 802.11 frames count, inc_tx OFF), the levels fixed to
+`nf::kNhmAbsThDbm` (no caller-chosen thresholds), composed as full dwords in
+`NhmBusyMath.h`. Arm at the start of a window, read at the end; not-ready
+reads come back invalid, never block. `NhmBusy.period` is the LAST arm's
+period on this device — a caller compares it with its own to detect that
+another caller re-armed in between. `read_nhm`/`read_nhm_absolute` are NOT
+built on this path. Unvalidated on air in this repo — no in-repo consumer.
+
+- **Recipe cache.** Holds the composed `0x1e40`/`0x1e60` dwords, which the
+  CLM busy window (`ArmChannelBusy`) shares; cleared by every CCX access
+  through `with_ccx`, by `GetRxEnergy(with_nhm)` — including via
+  `GetRxQuality()` —, `SetMonitorChannel`, `Init` and `InitWrite`. It survives `FastRetune` (the hop does not touch
+  `0x1e40`/`0x1e60`), so a window in flight across a hop spans both
+  channels — arm after the hop.
+- **The FA/CCA counter reset does not touch it.** phydm's "reset all
+  counter" (`0x1eb4[25]`, pulsed by `GetRxEnergy`, `GetRxEnergyScout` and
+  the coex thread's ~2 s `fa_stats` tick) leaves an in-flight window
+  intact. Measured on one 8812EU, 5 GHz ch 144, against a 100/100 ms
+  square-wave jam with 200 ms windows: windows pulsed 150 ms in read
+  48.3 % busy, sd 0.4 over 200 — identical to unpulsed ones (sd 0.5) —
+  where 50 ms windows on the same jam spread 0–97 % (sd 39.5), so a
+  window cleared to its last 50 ms could not have hidden. The ready bit
+  and the 255 sum were unaffected too. One unit, one channel; 2.4 GHz
+  and the 8822C not checked.
+- **It spoils an armed CLM window.** The NHM trigger re-arms the shared
+  engine, so `ArmNhmBusy` notes itself as an NHM read (see "CCX energy
+  sensing" below): a CLM window it lands inside reads back spoiled, never
+  as a valid short one. Use one busy facility per card at a time.
+- **Frozen power estimate.** The BB power estimate can be frozen (a
+  single-bucket histogram at a fixed level) after bring-up, after a
+  `FastRetune` and on 2.4 GHz, and `ReadNhmBusy` does not reject it. A
+  caller must apply the same peak-bucket test as `nf::nhm_abs_floor_dbm`
+  (`kNhmFrozenBucket`) before reading the buckets as airtime.

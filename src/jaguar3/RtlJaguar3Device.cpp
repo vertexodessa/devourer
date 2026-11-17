@@ -29,6 +29,8 @@
 #include "RtlTsf.h"          /* REG_TSFTR read/write shared with Jaguar1/2 */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */
+#include "jaguar3/NhmBusyMath.h" /* ArmNhmBusy/ReadNhmBusy's register program composer */
+#include "jaguar3/ScoutEnergyMath.h" /* GetRxEnergyScout's FA sum + reset composer */
 
 extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
@@ -51,6 +53,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
       _variant{variant}, _hal{device, logger, variant, _cfg},
       _radioManagement{device, logger, variant, _cfg}, _phydm{device, logger} {
+  _wide_tx_igi_floor.store(_cfg.tuning.wide_tx_igi_floor, std::memory_order_relaxed);
   /* fastretune_fw: the fw-switch H2C must ride the HAL's HMEBOX box counter
    * (the coex runtime thread sends its H2Cs through the same one; both
    * callers serialize on _reg_mu). */
@@ -84,6 +87,7 @@ struct WriteBatchScope {
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _rx_stop = false;
+  _nhm_busy_ready = false;
 
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
    * previous session's wide-TX IGI floor (_wide_tx_seen). */
@@ -908,6 +912,7 @@ void RtlJaguar3Device::Stop() {
 }
 
 void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
+  _nhm_busy_ready = false;
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
    * previous session's wide-TX IGI floor (_wide_tx_seen). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
@@ -1391,6 +1396,13 @@ void RtlJaguar3Device::StopContinuousTx() {
  * channel-busy signal (a CW tone spikes OFDM CCA); OFDM FA is the vendor sum of
  * the sub-counters. Read-then-reset for a per-call delta; serialized on _reg_mu
  * so it does not race the coex thread's register access. */
+RxActivity RtlJaguar3Device::GetRxActivity() {
+  RxActivity a;
+  a.valid = true;
+  _phydm.activity(a.cca, a.fa, a.window_us);
+  return a;
+}
+
 RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   RxEnergy e;
@@ -1401,14 +1413,16 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
   e.cca_cck = cca & 0xffff;
   e.fa_cck = rd(0x1a5c) & 0xffff;
   /* OFDM FA = parity + rate-illegal + crc8 + mcs + fast-fsync + sb-search +
-   * mcs-vht + crc8-vhta (phydm_fa_cnt_statistics_jgr3). */
+   * mcs-vht + crc8-vhta (phydm_fa_cnt_statistics_jgr3) — the same formula
+   * GetRxEnergyScout uses below, factored into ScoutEnergyMath.h so one
+   * selftest (tests/scout_energy_selftest.cpp) guards the copy both paths
+   * actually run, not a shadow of it. */
   const uint32_t r2d04 = rd(0x2d04), r2d08 = rd(0x2d08), r2d10 = rd(0x2d10),
                  r2d20 = rd(0x2d20), r2d0c = rd(0x2d0c);
-  e.fa_ofdm = ((r2d04 >> 16) & 0xffff) + (r2d08 & 0xffff) +
-              ((r2d08 >> 16) & 0xffff) + (r2d10 & 0xffff) + (r2d20 & 0xffff) +
-              ((r2d20 >> 16) & 0xffff) + ((r2d10 >> 16) & 0xffff) +
-              (r2d0c & 0xffff);
+  e.fa_ofdm = devourer::jgr3::fa_ofdm_sum(r2d04, r2d08, r2d10, r2d20, r2d0c);
   e.valid_fa = true;
+  e.valid_cck = true; /* GetRxEnergyScout leaves this false — see its doc
+                       * comment and RxSense.h. */
   e.igi = static_cast<uint8_t>(rd(0x1d70) & 0x7f);
   e.valid_igi = true;
 
@@ -1416,19 +1430,45 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
    * ~2 ms measurement window before the FA-counter reset below (0x1eb4[25] also
    * clears BB HW counters). Holds _reg_mu across the short wait — tolerable at
    * the emitter's >=100 ms cadence vs the coex thread's ~2 s tick. */
-  /* Under the CCX lock together with the note, and INSIDE _reg_mu (the
-   * ordering every other CCX user takes): this read re-arms the shared engine,
-   * so it destroys an armed busy window on this map — the note must be atomic
-   * with the re-arm or a destroyed window reads back valid. */
+  auto set_bb = [this](uint16_t a, uint32_t m, uint32_t v) {
+    _device.phy_set_bb_reg(a, m, v);
+  };
+  /* Both NHM windows below (the IGI-relative one, then the absolute idle
+   * floor) re-arm the shared CCX engine, so they destroy an armed CLM busy
+   * window on this map. The note goes under the CCX lock, atomic with the
+   * re-arms and INSIDE _reg_mu (the ordering every other CCX user takes), or
+   * a destroyed window reads back valid. They also reprogram what the
+   * busy-NHM recipe cache holds. */
+  std::unique_lock<std::mutex> ccx(busy_window_mutex(), std::defer_lock);
   if (with_nhm) {
-    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    ccx.lock();
     busy_window_note_nhm_read();
-    devourer::read_nhm(
-      devourer::nhm_regs_jgr3(), e.igi, rd,
-      [this](uint16_t a, uint32_t m, uint32_t v) {
-        _device.phy_set_bb_reg(a, m, v);
-      },
-      e);
+    _nhm_busy_ready = false;
+    devourer::read_nhm(devourer::nhm_regs_jgr3(), e.igi, rd, set_bb, e);
+  }
+
+  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor. Jaguar3 has no
+   * vendor idle-noise report (phydm_noisemonitor.c dispatches only to
+   * 8812/8821/8814A and 8822B/8821C, returns 0 for the 8822C/E), so this is the
+   * vendor channel-select's method instead (hal_dm_acs.c: NHM_ACS): a second
+   * NHM window with ABSOLUTE thresholds and tx-on/cca-busy samples excluded,
+   * so only idle air is binned, then the weighted bucket average -> dBm
+   * (NoiseFloorMath.h). BB-driven, no clock-stop -> wedge-free under live RX;
+   * another ~2 ms under _reg_mu, opt-in. Guarded to the plausible idle band so
+   * a saturated channel or a garbage window never emits a fake dBm; resolution
+   * is the 3 dB bucket width near the floor. */
+  if (with_nhm && _cfg.rx.abs_noise_floor) {
+    constexpr uint16_t kPeriod = 500; /* 4us units, ~2 ms */
+    uint8_t b[12] = {};
+    uint16_t dur = 0;
+    int dbm = 0;
+    if (devourer::read_nhm_absolute(devourer::nhm_regs_jgr3(), rd, set_bb, b,
+                                    dur, kPeriod) &&
+        devourer::nf::nhm_abs_floor_dbm(b, dur, kPeriod, dbm) &&
+        dbm >= -105 && dbm <= -60) {
+      e.abs_noise_floor_dbm = static_cast<int8_t>(dbm);
+      e.valid_noise_floor = true;
+    }
   }
 
   /* Reset: CCK FA 0x1a2c[15:14] 0->2, CCK CCA 0x1a2c[13:12] 0->2, then OFDM
@@ -1443,12 +1483,210 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
   _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x0);
   _device.phy_set_bb_reg(0x1d2c, 1u << 31, 0x1);
 
-  /* No active absolute noise floor on Jaguar3: the vendor 8822C driver
-   * has no idle-noise path (phydm_noisemonitor.c dispatches the report only to
-   * 8822B/8821C and returns 0 for the 8822C), so e.valid_noise_floor stays
-   * false. The passive rssi-snr floor (RxQuality.noise_floor_dbm) is J3's only
-   * floor. */
   return e;
+}
+
+/* Minimal frame-free OFDM FA + CCA read for the in-session channel scout.
+ * 12 EP0 transfers in TWO batched groups: 8 reads
+ * (0x2c08, the five OFDM FA words, and 0x1d2c/0x1eb4), then the 4-write OFDM
+ * counter reset composed in memory from the two dwords just read — the writes
+ * depend on those reads, so they cannot ride the same group. At
+ * kAsyncWriteDepth = 8 that is two completion waits.
+ * Composed full-dword writes, never phy_set_bb_reg — masked BB writes on JGR3
+ * have the double-shift gotcha (jaguar3/CLAUDE.md) and cost a read-modify-
+ * write each. Batched: see ITransport::ctrl_batch.
+ *
+ * The two reset dwords are read fresh inside the same batch every call; a
+ * host-side shadow buys nothing measurable once batched
+ * (tests/scout_read_bench.cpp) and would need invalidation on paths the host
+ * cannot see (firmware channel switch).
+ *
+ * ONE HARDWARE-BEHAVIOUR CHANGE batching introduces, recorded so a future
+ * oddity has a documented suspect: pipelining narrows the 0x1eb4[25]
+ * counter-reset pulse (and, on the hop path, the 0x0[16] BB-reset pulse) from
+ * the ~290-375 us a synchronous register write took to the ~7-16 us of one
+ * pipelined transfer. Accepted: that is still far wider than the vendor
+ * kernel gives these pulses over PCIe MMIO, and the on-air readings after the
+ * change are consistent (counters reset every call, real activity captured,
+ * no upward drift over a 200-call run).
+ *
+ * Fills ONLY valid_fa/fa_ofdm/cca_ofdm — cca_cck, fa_cck, igi/valid_igi, NHM
+ * and the noise floor are left invalid/zero, and valid_cck is left at its
+ * default false: the scout deliberately skips the CCK 0x1a2c reset toggles
+ * (4 more masked writes for a counter this caller never asked for), so
+ * cca_cck/fa_cck here are zero with NO reset behind that zero, not a real
+ * reading — see RxEnergy::valid_cck (RxSense.h) for the full contract. The
+ * two in-repo consumers that fold the CCK half into an occupancy estimate,
+ * src/chanmig/EvidenceStore.h and src/hopset/HopsetSense.h, gate on
+ * valid_cck for exactly this reason. Which register actually owns clearing
+ * 0x2c08's CCK half (the 0x1a2c toggles, 0x1eb4[25], or both) remains
+ * unverified — in both GetRxEnergy and PhydmRuntimeJaguar3::fa_stats() the
+ * 0x1a2c toggles and the 0x1eb4[25] reset always run together — but that
+ * does not affect correctness now that valid_cck makes the caller's
+ * obligation explicit. The reset does NOT disturb an in-flight ArmNhmBusy
+ * window despite the vendor's "Reset all counter" (measured:
+ * src/jaguar3/CLAUDE.md "Busy-airtime NHM").
+ *
+ * The OFDM FA/CCA delta is shared with PhydmRuntimeJaguar3::fa_stats() (the
+ * coex thread's periodic ~2 s tick performs the identical 0x1d2c/0x1eb4
+ * reset under this same _reg_mu, consuming whatever accumulated since the
+ * last reset from either source) — pre-existing sharing (GetRxEnergy has it
+ * too), not something this path can fix; a caller reading a suspiciously
+ * small delta right after a coex tick is seeing that, not a scout bug. The
+ * same tick is the root cause of the transfer-count contamination documented
+ * in tests/scout_read_bench.cpp's header.
+ *
+ * valid_fa reports the batches' own success: a failed group yields an invalid
+ * reading rather than zeros that would read as a quiet channel. A failed READ
+ * group additionally suppresses the reset writes entirely — see the bail-out
+ * below for why that is mandatory rather than tidy.
+ *
+ * Skipping a reset is NOT free, though it is far cheaper than the alternative.
+ * The OFDM counters keep accumulating across the failed dwell, so the NEXT
+ * successful sample's delta covers that dwell too — and the consumers
+ * (HopsetSense / emit_sense) divide by THAT sample's own window_us. So the
+ * next sample's cca_rate/fa_rate is INFLATED, not merely taken over a longer
+ * window, and one inflated rate can read as a busy channel and bias a
+ * hold/exclude decision. Bounded — the coex thread's fa_stats() resets the
+ * same counters on its ~2 s tick — and still far better than the register
+ * corruption the bail-out prevents, but do not read it as costless. Whether
+ * 0x2c08's counters saturate or wrap when a reset is skipped is NOT
+ * established (no vendor documentation in this tree says), so the worst-case
+ * magnitude of that inflation is unknown.
+ *
+ * ONE ESCAPE ROUTE valid_fa does NOT cover, so a caller should know: if the
+ * transport falls back to ITransport::ctrl_batch's synchronous path (a
+ * dead async pool, or usb.ctrl_batch off), its reads go through
+ * UsbTransport::ctrl_read, which THROWS std::ios_base::failure on a failed
+ * register read rather than returning false. So on a dying device this
+ * 8-read group can leave by exception, bypassing ok/valid_fa entirely. That
+ * throw is pre-existing and is this codebase's house idiom for a dead
+ * register bus (every other read path on this chip behaves the same), and
+ * fast_retune's batch is all writes so the hop path is unaffected — changing
+ * the idiom would touch every chip's read path.
+ *
+ * Under _reg_mu like every register access here. */
+RxEnergy RtlJaguar3Device::GetRxEnergyScout() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  RxEnergy e;
+  /* Reads first, then the reset: the batch runs in submission order, so the
+   * counters are sampled before they are cleared, and 0x1d2c/0x1eb4 are read
+   * before the dwords composed from them are written back. */
+  std::vector<devourer::CtrlOp> rd = {
+      {false, 0x2c08, 0}, {false, 0x2d04, 0}, {false, 0x2d08, 0},
+      {false, 0x2d10, 0}, {false, 0x2d20, 0}, {false, 0x2d0c, 0},
+      {false, 0x1d2c, 0}, {false, 0x1eb4, 0}};
+  if (!_device.ctrl_batch(rd)) {
+    /* NEVER compose the reset out of a failed read. ctrl_batch leaves a failed
+     * op's value at the 0 it was constructed with, so composing anyway would
+     * write full dwords of 0x00000000/0x80000000 into 0x1d2c (the RX clock
+     * gate) and 0x02000000/0x00000000 into 0x1eb4 — clobbering every other bit
+     * of two live BB registers and leaving the receiver deaf, permanently,
+     * since the next call would read the corrupted value back and rewrite it.
+     * Dropping the sample is cheap but not free — the skipped reset inflates
+     * the NEXT sample's cca_rate/fa_rate (see the header comment above), which
+     * is bounded by the coex tick and vastly preferable to corrupting two live
+     * BB registers, but is a real effect. Pinned by
+     * tests/scout_batch_fail_selftest.cpp, because nothing else can see this —
+     * valid_fa=false only drops the sample, and scout_read_bench's
+     * plausibility tripwire is itself gated on valid_fa. */
+    e.valid_fa = false;
+    return e;
+  }
+  const devourer::jgr3::ResetDwords r =
+      devourer::jgr3::compose_reset(rd[6].value, rd[7].value);
+  /* KNOWN, untouched by the read-side bail-out above: if THIS batch fails partway, it can leave
+   * 0x1d2c[31] cleared — the RX clock gate off — because the ops that would
+   * have restored it were skipped. Unlike the read-side bug that is NOT a
+   * latch: the values here are composed from a fresh read each call, so the
+   * next successful scout writes d1d2c_on = value | bit31 and the gate comes
+   * back. One dwell of deafness, self-healing, versus the permanent corruption
+   * a failed READ would have caused. */
+  std::vector<devourer::CtrlOp> wr = {
+      {true, 0x1d2c, r.d1d2c_off}, {true, 0x1eb4, r.d1eb4_on},
+      {true, 0x1eb4, r.d1eb4_off}, {true, 0x1d2c, r.d1d2c_on}};
+  e.valid_fa = _device.ctrl_batch(wr);
+  e.cca_ofdm = (rd[0].value >> 16) & 0xffff;
+  e.fa_ofdm = devourer::jgr3::fa_ofdm_sum(rd[1].value, rd[2].value,
+                                          rd[3].value, rd[4].value,
+                                          rd[5].value);
+  return e;
+}
+
+/* Busy-airtime NHM (IRtlRadio::ArmNhmBusy). First call: read the three
+ * registers the recipe shares bits with, compose full dwords
+ * (NhmBusyMath.h), write thresholds + cfg + period, pulse the trigger --
+ * one read batch, one write batch. Later calls: period + trigger pulse
+ * only, composed from the cached dwords. The cache is valid only while this
+ * file is the sole writer of 0x1e40/0x1e60; every other CCX arm path must
+ * clear _nhm_busy_ready (GetRxEnergy(with_nhm), SetMonitorChannel, Init,
+ * InitWrite). A failed read never composes a write (scout-read rule). */
+bool RtlJaguar3Device::ArmNhmBusy(uint16_t period_4us) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_brought_up) return false;
+  /* The NHM trigger re-arms the shared CCX engine, which destroys an armed
+   * CLM busy window on this map: note it under the CCX lock, as GetRxEnergy
+   * does, so that window reads back spoiled rather than valid. */
+  std::lock_guard<std::mutex> ccx(busy_window_mutex());
+  busy_window_note_nhm_read();
+  if (!_nhm_busy_ready) {
+    std::vector<devourer::CtrlOp> rd = {
+        {false, 0x1e40, 0}, {false, 0x1e5c, 0}, {false, 0x1e60, 0}};
+    if (!_device.ctrl_batch(rd)) return false;
+    uint8_t th[11];
+    devourer::nf::nhm_abs_thresholds(th);
+    const devourer::jgr3::NhmProgram p = devourer::jgr3::compose_nhm_program(
+        rd[0].value, rd[1].value, rd[2].value, th, devourer::jgr3::kNhmBusyCfg,
+        period_4us);
+    std::vector<devourer::CtrlOp> wr = {
+        {true, 0x1e44, p.w1e44},
+        {true, 0x1e48, p.w1e48},
+        {true, 0x1e5c, p.w1e5c},
+        {true, 0x1e40, p.w1e40},
+        {true, 0x1e60, devourer::jgr3::nhm_trigger_low(p.w1e60)},
+        {true, 0x1e60, devourer::jgr3::nhm_trigger_high(p.w1e60)}};
+    if (!_device.ctrl_batch(wr)) return false;
+    _nhm_busy_1e40 = p.w1e40;
+    _nhm_busy_1e60 = p.w1e60;
+    _nhm_busy_ready = true;
+    return true;
+  }
+  const uint32_t w40 = devourer::jgr3::nhm_with_period(_nhm_busy_1e40, period_4us);
+  std::vector<devourer::CtrlOp> wr = {
+      {true, 0x1e40, w40},
+      {true, 0x1e60, devourer::jgr3::nhm_trigger_low(_nhm_busy_1e60)},
+      {true, 0x1e60, devourer::jgr3::nhm_trigger_high(_nhm_busy_1e60)}};
+  if (!_device.ctrl_batch(wr)) {
+    _nhm_busy_ready = false;  /* unknown register state: reprogram next time */
+    return false;
+  }
+  _nhm_busy_1e40 = w40;
+  return true;
+}
+
+int RtlJaguar3Device::ReadTunedCentral() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_brought_up) return -1;
+  /* Path-A RF18 through the direct RF window (the same mirror
+   * fw_switch_confirm reads): [7:0] = central channel. */
+  const uint32_t w = _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2)));
+  return static_cast<int>(w & 0xffu);
+}
+
+NhmBusy RtlJaguar3Device::ReadNhmBusy() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  NhmBusy out;
+  if (!_brought_up || !_nhm_busy_ready) return out;
+  std::vector<devourer::CtrlOp> rd = {
+      {false, 0x2d4c, 0}, {false, 0x2d40, 0}, {false, 0x2d44, 0}, {false, 0x2d48, 0}};
+  if (!_device.ctrl_batch(rd)) return out;
+  const devourer::jgr3::NhmResult r = devourer::jgr3::parse_nhm_result(
+      rd[0].value, rd[1].value, rd[2].value, rd[3].value);
+  out.valid = r.ready;
+  for (int i = 0; i < 12; ++i) out.buckets[i] = r.buckets[i];
+  out.duration = r.duration;
+  out.period = static_cast<uint16_t>(_nhm_busy_1e40 >> 16);
+  return out;
 }
 
 /* Disable / restore the MAC carrier-sense gate that defers TX. Two 0x520 bits:
@@ -1558,6 +1796,7 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
 
   const bool ch_changed = channel.Channel != _channel.Channel;
   _channel = channel;
+  _nhm_busy_ready = false;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
   apply_igi_floor_locked(channel.Channel, channel.ChannelWidth);
@@ -1664,7 +1903,23 @@ void RtlJaguar3Device::apply_igi_floor_locked(uint8_t channel,
                                               bool wide_tx_seen) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
   _phydm.set_igi_floor(
-      (wide && wide_tx_seen) ? _cfg.tuning.wide_tx_igi_floor : 0, channel);
+      (wide && wide_tx_seen)
+          ? _wide_tx_igi_floor.load(std::memory_order_relaxed)
+          : 0,
+      channel);
+}
+
+bool RtlJaguar3Device::SetWideTxIgiFloor(uint8_t floor) {
+  if (floor > 0x7f)
+    return false;
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _wide_tx_igi_floor.store(floor, std::memory_order_relaxed);
+  /* Before bring-up there is no tune to apply it to: the first wide frame
+   * arms it (build_tx_block). After, the retune paths' own rule decides
+   * whether it is on right now. */
+  if (_brought_up)
+    apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth);
+  return true;
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -2804,7 +3059,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   const bool wide_frame =
       bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80;
   const bool c_die = _variant == jaguar3::ChipVariant::C8822C;
-  if (wide_frame && _cfg.tuning.wide_tx_igi_floor != 0 &&
+  if (wide_frame && _wide_tx_igi_floor.load(std::memory_order_relaxed) != 0 &&
       !_wide_tx_seen.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_seen.load(std::memory_order_relaxed)) {
