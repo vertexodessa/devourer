@@ -2026,7 +2026,7 @@ int main(int argc, char **argv) {
           ev.f("cause", h.cause).f("fix", h.fix);
         }
         /* DEVOURER_RXQUALITY=1 — dogfood the library GetRxQuality() feed: the
-         * same window a linked controller (fluke_gs) would read, incl. the
+         * same window a linked adaptive-link controller would read, incl. the
          * passive noise-floor. NB it drains the device-internal accumulator +
          * calls GetRxEnergy itself, so its counters are independent of the
          * rx.energy/link.health events above (which use the
@@ -2059,7 +2059,8 @@ int main(int argc, char **argv) {
             ev.f("noise_floor_dbm", nullptr);
           /* Active/frame-free absolute floor (DEVOURER_RX_NOISE_FLOOR): the
            * companion to the passive floor above. Null unless opted-in AND the
-           * generation supports it (Jaguar2 live / Jaguar1 8812A CAL). */
+           * generation supports it (Jaguar2 live, Jaguar1 8812A CAL,
+           * Jaguar3/Kestrel NHM idle window). */
           if (q.abs_nf_valid)
             ev.f("abs_noise_floor_dbm", q.abs_noise_floor_dbm);
           else
@@ -2530,6 +2531,10 @@ int main(int argc, char **argv) {
           ev.f("igi", e.igi);
         else
           ev.f("igi", nullptr);
+        if (e.valid_noise_floor) /* active absolute floor (opt-in), per bin */
+          ev.f("abs_noise_floor_dbm", e.abs_noise_floor_dbm);
+        else
+          ev.f("abs_noise_floor_dbm", nullptr);
         emit_ccx(ev, e);
         ev.f("retune_us", retune_us)
             .f("frames", agg.n)

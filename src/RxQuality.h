@@ -59,7 +59,8 @@ struct RxQuality {
    * floor above: the vendor idle-noise monitor, measured with no wanted signal
    * (site survey / channel selection). Present only when the caller opted in
    * (DEVOURER_RX_NOISE_FLOOR) and the generation supports it (Jaguar2 live,
-   * Jaguar1 8812A/8821A RX-idle CAL; false elsewhere). */
+   * Jaguar1 8812A/8821A RX-idle CAL, Jaguar3 + Kestrel NHM idle window; false
+   * on the RTL8733B). */
   int8_t abs_noise_floor_dbm = 0;
   bool abs_nf_valid = false;
 
