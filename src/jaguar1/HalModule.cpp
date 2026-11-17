@@ -12,6 +12,7 @@
 #include "registry_priv.h"
 #include "rtl8812a_hal.h"
 #include "rtl8812a_spec.h"
+#include "TxAggPlan.h" /* jaguar1_usb_agg_max: the TXDMA mode follows the packer */
 
 #include <cstdlib>
 
@@ -1849,10 +1850,18 @@ void HalModule::usb_AggSettingTxUpdate_8812A() {
    * count per chip: 8812A/8811A = 1 (the vendor "OQT overflow" clamp),
    * 8821A = 6 (kernel default). Must match the descs_per_bulk the URB packer
    * plans with (RtlJaguarDevice::send_packets). */
-  if (_cfg.tx.usb_agg_max > 0) {
+  if (devourer::jaguar1_usb_agg_max(
+          _eepromManager->version_id.ICType == CHIP_8812,
+          _cfg.tx.usb_agg_max, _cfg.tx.usb_agg_8812a) > 0) {
     _usbTxAggMode = true;
     _usbTxAggDescNum =
         _eepromManager->version_id.ICType == CHIP_8821 ? 6 : 1;
+  } else if (_cfg.tx.usb_agg_max > 0) {
+    /* Bring-up, once: a caller asking for packing on an 8812A gets single
+     * frames, and its measurements must say so (TxAggPlan.h). */
+    _logger->warn("8812A: USB TX packing off (tx.usb_agg_max={} asked); "
+                  "tx.usb_agg_8812a / DEVOURER_TX_USB_AGG_8812A=1 enables it",
+                  _cfg.tx.usb_agg_max);
   }
   if (_usbTxAggMode) {
     uint32_t value32 = _device.rtw_read32(REG_TDECTRL);

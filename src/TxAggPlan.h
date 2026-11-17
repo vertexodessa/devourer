@@ -72,6 +72,15 @@ struct TxAggPlan {
   size_t frames() const { return blocks.size(); }
 };
 
+/* Frames per URB a Jaguar1 chip packs: the caller's usb_agg_max, except an
+ * RTL8812A without the usb_agg_8812a opt-in, which sends one frame per URB
+ * (DeviceConfig::tx.usb_agg_8812a has the measurement). Both the TXDMA
+ * bring-up and send_packets use it, so they cannot disagree. */
+inline unsigned jaguar1_usb_agg_max(bool chip_8812a, unsigned requested,
+                                    bool allow_8812a) {
+  return chip_8812a && !allow_8812a ? 0u : requested;
+}
+
 inline size_t txagg_rnd8(size_t v) { return (v + 7) & ~static_cast<size_t>(7); }
 
 /* Greedily pack frames [0..n) (802.11 payload lengths, radiotap already
