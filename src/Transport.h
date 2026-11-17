@@ -39,6 +39,19 @@ struct UsbLinkInfo {
   std::vector<uint8_t> bulk_out_eps; /* descriptor order */
 };
 
+/* ---- batched control transfers -------------------------------------------
+ * One register access in a group submitted to ITransport::ctrl_batch.
+ * `value` is the payload for a write and the RESULT slot for a read (filled
+ * in place, in this op's own element — see the contract on ctrl_batch).
+ * 16-bit MAC/BB space only; the wIndex=1 window is not batchable.
+ * Namespace scope, not nested in ITransport: the selftest, RtlAdapter's
+ * forwarder and every call site name it `devourer::CtrlOp`. */
+struct CtrlOp {
+  bool write;
+  uint16_t addr;
+  uint32_t value;
+};
+
 class ITransport {
 public:
   virtual ~ITransport() = default;
@@ -91,6 +104,53 @@ public:
    * per stage. Per instance, never process-wide. 0 where the notion does
    * not apply (PCIe MMIO). */
   virtual uint64_t ctrl_xfers() const { return 0; }
+
+  /* ---- batched control transfers ----
+   * A group of EP0 register reads/writes submitted back to back, paying one
+   * completion wait per chunk of at most the transport's slot depth instead
+   * of one host round trip per op.
+   *
+   * CONTRACT, owed by every implementation:
+   *   - ops execute in submission order, so a read after a write to the same
+   *     address in one batch sees that write (on USB this is EP0's in-order
+   *     completion, the property the pipelined write batch already rests on);
+   *   - each read's value lands in ITS OWN op's `value`;
+   *   - a write op's `value` is an input and comes back untouched;
+   *   - returns false if an op failed, and a failure does NOT abort the rest
+   *     of the batch (a half-issued hop leaves a 3-wire bracket open or a BB
+   *     reset asserted — finishing and reporting beats bailing out). The
+   *     default below reports write failures only; a failed read leaves by
+   *     the transport's read idiom (exception on USB — read32 has no failure
+   *     return). UsbTransport's own ctrl_batch reports a failed read as false.
+   *     A read-then-compose-then-write caller must allow for both; see
+   *     RtlJaguar3Device::GetRxEnergyScout.
+   * tests/ctrl_batch_selftest.cpp pins all four against a fake transport.
+   *
+   * Serialized by the CALLER (it holds its device register lock for the
+   * whole group; the transport additionally takes its own mutex so a bring-up
+   * write_batch_* and a runtime ctrl_batch can never interleave over the same
+   * slot pool). Default: synchronous, in order — correct on PCIe and on any
+   * transport that has nothing to pipeline.
+   *
+   * HAZARD, USB: the implementation pumps libusb events from the CALLING
+   * thread while the RX bulk pump may be doing the same on its own thread.
+   * libusb permits that, but either thread may reap either thread's
+   * completions, so an RX on_data callback can run on the caller's thread
+   * inside this call, and vice versa. Hence: nothing reachable from on_data
+   * may take a lock a ctrl_batch caller holds (the device register lock),
+   * and the wait loop keys on the per-slot `done` flag the completion
+   * callback sets — never on "I pumped, therefore mine finished".
+   * See UsbTransport::ctrl_batch. */
+  virtual bool ctrl_batch(std::vector<CtrlOp> &ops) {
+    bool ok = true;
+    for (CtrlOp &op : ops) {
+      if (op.write)
+        ok = write32(op.addr, op.value) && ok;
+      else
+        op.value = read32(op.addr);
+    }
+    return ok;
+  }
 
   /* ---- frame plane ---- */
   /* Fire-and-forget data TX (the send_packet hot path). `ep` is the USB

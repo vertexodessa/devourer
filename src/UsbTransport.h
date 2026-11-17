@@ -37,6 +37,7 @@ public:
                bool rx_zerocopy = true, RxMode rx_mode = RxMode::Async,
                int pool_spare = 0, int ring_ms = 0,
                PoolExhaust pool_exhaust = PoolExhaust::Backpressure,
+               bool ctrl_batch_enabled = true,
                bool tx_no_cancel_multipkt = false);
   ~UsbTransport() override;
 
@@ -103,6 +104,7 @@ public:
   uint64_t ctrl_xfers() const override {
     return _ctrl_xfers.load(std::memory_order_relaxed);
   }
+  bool ctrl_batch(std::vector<CtrlOp> &ops) override;
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
                 unsigned timeout_ms) override;
@@ -185,6 +187,11 @@ private:
    * Returns false on failure (data untouched). */
   bool async_read(uint16_t wvalue, uint16_t windex, void *data, size_t n);
   AsyncWrite *async_take_slot();
+  /* Non-blocking take: a free slot, reset for submission, or null. */
+  AsyncWrite *async_try_take_slot();
+  /* Build the slot pool on first use (bring-up batch or ctrl_batch); false
+   * if a transfer could not be allocated — the caller stays synchronous. */
+  bool ensure_async_slots();
   bool async_submit(AsyncWrite *w); /* in-flight accounting before submit */
   /* Pump until this pool's completion counter moves past `before` (a
    * snapshot the caller took BEFORE checking whatever it is waiting for,
@@ -204,16 +211,24 @@ private:
   std::vector<AsyncWrite *> _aw_all;
   /* Set when a drain gave up with transfers still submitted: the destructor
    * then leaks those slots instead of freeing a transfer libusb still owns. */
-  bool _aw_abandoned = false;
-  /* Vendor control transfers (register reads + writes) this transport has
-   * issued; per instance, so two adapters in one process do not
-   * cross-attribute their InitTimer stage counts. */
-  std::atomic<uint64_t> _ctrl_xfers{0};
+  std::atomic<bool> _aw_abandoned{false};
+  /* Serializes a runtime ctrl_batch against the bring-up write_batch_* pair
+   * over the one slot pool: ctrl_batch runs from any control thread while
+   * the RX loop is live, so it checks `_batch_open` under this lock and
+   * falls back to the synchronous default inside a bring-up batch. It does
+   * not serialize flush_writes (a TX send's opening drain) — see the known
+   * limitation on UsbTransport::ctrl_batch. */
+  std::mutex _batch_mu;
+  bool _cfg_ctrl_batch = true;       /* DeviceConfig::Usb::ctrl_batch */
   bool _tx_no_cancel_multipkt = false; /* DeviceConfig::Tx; tx_sync_data only */
   /* Smallest bulk-OUT wMaxPacketSize, from discover_endpoints: what
    * tx_sync_data's never-cancel rule measures a transfer against
    * (src/BulkOutTimeout.h). 0 = unknown. */
   unsigned _bulk_out_mps = 0;
+  /* Vendor control transfers (register reads + writes) this transport has
+   * issued; per instance, so two adapters in one process do not
+   * cross-attribute their InitTimer stage counts. */
+  std::atomic<uint64_t> _ctrl_xfers{0};
   void discover_endpoints(); /* was InitDvObj */
   const char *speed_str() const;
   static void transfer_callback(struct libusb_transfer *transfer);
